@@ -2,7 +2,9 @@ from flask import Flask, request, abort
 from langchain.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.vectorstores import SupabaseVectorStore
+from langchain.llms import OpenAI
 from langchain.embeddings import OpenAIEmbeddings
+from langchain.chains.question_answering import load_qa_chain
 from dotenv import load_dotenv
 import tempfile
 import shutil
@@ -28,6 +30,20 @@ def hello():
 def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+@app.route('/chat', methods=['POST'])
+def handle_chat():
+    query = request.json['query']
+    embeddings = OpenAIEmbeddings()
+    db = SupabaseVectorStore(supabase, embeddings, table_name='documents')
+    relevant_context = db.similarity_search(query)
+    chain = load_qa_chain(OpenAI(temperature=0), chain_type="stuff")
+    answer = chain.run(input_documents=relevant_context, question=query)
+
+    status_code = 200
+    headers = {'Content-Type': 'text/plain'}
+    return answer, status_code, headers
 
 
 @app.route('/pdf', methods=['POST', 'GET'])
@@ -71,7 +87,6 @@ def handle_pdfs():
             db = SupabaseVectorStore.from_documents(
                 chunks, embeddings, client=supabase)
 
-            print(db)
 
             shutil.rmtree(tempdir)  # Remove the tempfile
 
