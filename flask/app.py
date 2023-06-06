@@ -5,6 +5,10 @@ from langchain.vectorstores import SupabaseVectorStore
 from langchain.llms import OpenAI
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.chains.question_answering import load_qa_chain
+from langchain.chains import ConversationalRetrievalChain
+from langchain.memory import ConversationBufferMemory
+from langchain.schema import messages_to_dict, messages_from_dict
+from langchain.memory import ConversationBufferMemory, ChatMessageHistory
 from dotenv import load_dotenv
 import tempfile
 import shutil
@@ -22,14 +26,54 @@ app = Flask(__name__)
 ALLOWED_EXTENSIONS = ['.pdf']
 
 
-@app.route('/')
-def hello():
-    return '<h1>Hello, World!</h1>'
-
-
 def allowed_file(filename):
     return '.' in filename and \
            filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+@app.route('/')
+def hello():
+    print('Hello')
+    return '<h1>Hello, World!</h1>'
+
+
+@app.route('/<conversation_id>/chat', methods=['POST', 'GET'])
+def handle_conversation(conversation_id):
+    # Get conversation with ID from db
+    result = supabase.table('conversations').select(
+        '*').eq('conversation_id', conversation_id).limit(1).execute()
+    if len(result.data) <= 1:
+        serialized_message_dict = '{}'
+        memory = ConversationBufferMemory(
+            memory_key="chat_history", return_messages=True)
+    else:
+        serialized_message_dict = result.data[0]['serialized_conversation_history']
+        messages = messages_from_dict(serialized_message_dict
+                                      )
+        retrieved_chat_history = ChatMessageHistory(messages=messages)
+        memory = ConversationBufferMemory(chat_memory=retrieved_chat_history)
+
+    print('HAVE MEMORY')
+    if request.method == 'GET':
+        status_code = 200
+        headers = {'Content-Type': 'text/plain'}
+        print('RETURN GET')
+        return serialized_message_dict, status_code, headers
+
+    if request.method == 'POST':
+        query = request.json['query']
+
+        embeddings = OpenAIEmbeddings()
+        db = SupabaseVectorStore(supabase, embeddings, table_name='documents')
+        qa = ConversationalRetrievalChain.from_llm(
+            OpenAI(temperature=0), db.as_retriever(), memory=memory)
+        result = qa({"question": query})
+
+        status_code = 200
+        headers = {'Content-Type': 'text/plain'}
+        return messages_to_dict(qa.memory.chat_memory.messages), status_code, headers
+    # TODO: Missing, write new chat to db
+    return abort(400, 'unhandled request')
 
 
 @app.route('/chat', methods=['POST'])
@@ -55,10 +99,10 @@ def handle_pdfs():
         file = request.files['file']
         if file.filename != '':
             # Check if file already parsed
-            parsed_pdfs = supabase.table('pdfs').select("pdf_name").eq('pdf_name',file.filename).execute()
+            parsed_pdfs = supabase.table('pdfs').select(
+                "pdf_name").eq('pdf_name', file.filename).execute()
             if len(parsed_pdfs.data) > 0:
                 return abort(400, 'File of same name already in memory. If this is a different file give it a unique name')
-            
 
             tempdir = tempfile.mkdtemp()
             filepath = os.path.join(tempdir, file.filename)
@@ -74,26 +118,21 @@ def handle_pdfs():
             )
             documents = loader.load()
             for doc in documents:
-                #Avoid unescaped unicode characters such as \\u0000 by ascii encoding
+                # Avoid unescaped unicode characters such as \\u0000 by ascii encoding
                 doc.page_content = utils.remove_unicode_null(doc.page_content)
                 doc.metadata['source'] = file.filename
-            
+
             chunks = text_splitter.split_documents(documents)
-            
-            
-        
 
             embeddings = OpenAIEmbeddings()
             db = SupabaseVectorStore.from_documents(
                 chunks, embeddings, client=supabase)
 
-
             shutil.rmtree(tempdir)  # Remove the tempfile
 
-            #Save file as parsed to pdfs table
-            data, count = supabase.table('pdfs').insert({"pdf_name": file.filename}).execute()
-
-
+            # Save file as parsed to pdfs table
+            data, count = supabase.table('pdfs').insert(
+                {"pdf_name": file.filename}).execute()
 
         return '<h1>Successfully submitted file</h1>'
     else:
