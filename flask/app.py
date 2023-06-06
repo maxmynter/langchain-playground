@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import tempfile
 import shutil
 import os
+import utils
 from supabase.client import Client, create_client
 
 supabase_url = os.environ.get("PUBLIC_SUPABASE_URL")
@@ -37,6 +38,12 @@ def handle_pdfs():
             return abort(400, 'No file sent')
         file = request.files['file']
         if file.filename != '':
+            # Check if file already parsed
+            parsed_pdfs = supabase.table('pdfs').select("pdf_name").eq('pdf_name',file.filename).execute()
+            if len(parsed_pdfs.data) > 0:
+                return abort(400, 'File of same name already in memory. If this is a different file give it a unique name')
+            
+
             tempdir = tempfile.mkdtemp()
             filepath = os.path.join(tempdir, file.filename)
 
@@ -49,12 +56,16 @@ def handle_pdfs():
                 chunk_overlap=50,
                 length_function=len,
             )
-
-            chunks = text_splitter.create_documents(
-                [doc.page_content for doc in loader.load()])
+            documents = loader.load()
+            for doc in documents:
+                #Avoid unescaped unicode characters such as \\u0000 by ascii encoding
+                doc.page_content = utils.remove_unicode_null(doc.page_content)
+                doc.metadata['source'] = file.filename
             
-            for chunk in chunks:
-                chunk.page_content = chunk.page_content.encode("ascii", "ignore").decode()
+            chunks = text_splitter.split_documents(documents)
+            
+            
+        
 
             embeddings = OpenAIEmbeddings()
             db = SupabaseVectorStore.from_documents(
@@ -63,6 +74,11 @@ def handle_pdfs():
             print(db)
 
             shutil.rmtree(tempdir)  # Remove the tempfile
+
+            #Save file as parsed to pdfs table
+            data, count = supabase.table('pdfs').insert({"pdf_name": file.filename}).execute()
+
+
 
         return '<h1>Successfully submitted file</h1>'
     else:
