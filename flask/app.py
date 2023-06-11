@@ -42,7 +42,8 @@ def handle_conversation(conversation_id):
     # Get conversation with ID from db
     result = supabase.table('conversations').select(
         '*').eq('conversation_id', conversation_id).limit(1).execute()
-    if len(result.data) <= 1:
+    print("\n FROM DB: ", result)
+    if len(result.data) < 1:
         serialized_message_dict = '{}'
         memory = ConversationBufferMemory(
             memory_key="chat_history", return_messages=True)
@@ -51,13 +52,12 @@ def handle_conversation(conversation_id):
         messages = messages_from_dict(serialized_message_dict
                                       )
         retrieved_chat_history = ChatMessageHistory(messages=messages)
-        memory = ConversationBufferMemory(chat_memory=retrieved_chat_history)
+        memory = ConversationBufferMemory(
+            chat_memory=retrieved_chat_history, memory_key="chat_history", return_messages=True)
 
-    print('HAVE MEMORY')
     if request.method == 'GET':
         status_code = 200
         headers = {'Content-Type': 'text/plain'}
-        print('RETURN GET')
         return serialized_message_dict, status_code, headers
 
     if request.method == 'POST':
@@ -65,14 +65,21 @@ def handle_conversation(conversation_id):
 
         embeddings = OpenAIEmbeddings()
         db = SupabaseVectorStore(supabase, embeddings, table_name='documents')
+
         qa = ConversationalRetrievalChain.from_llm(
             OpenAI(temperature=0), db.as_retriever(), memory=memory)
         result = qa({"question": query})
 
+        messages_dict = messages_to_dict(qa.memory.chat_memory.messages)
+
+        conversation = {'serialized_conversation_history': messages_dict,
+                        'conversation_id': conversation_id}
+        supabase.table('conversations').upsert(
+            conversation, on_conflict=('conversation_id')).execute()
+
         status_code = 200
         headers = {'Content-Type': 'text/plain'}
-        return messages_to_dict(qa.memory.chat_memory.messages), status_code, headers
-    # TODO: Missing, write new chat to db
+        return messages_dict, status_code, headers
     return abort(400, 'unhandled request')
 
 
